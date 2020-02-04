@@ -1,0 +1,86 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provisions an internal Application Load Balancer.
+
+Parameters:
+  Prefix:
+    Type: String
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: Create VPC endpoints in this VPC
+
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: The public subnets in which to create the load balancer
+
+Resources:
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Load balancer security group
+      GroupName: !Sub "${Prefix}-load-balancer-sg"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-load-balancer-sg"
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${Prefix}-load-balancer"
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "30"
+      Subnets: !Ref PublicSubnets
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - TargetGroupArn: !Ref LoadBalancerTargetGroup
+          Type: forward
+
+  LoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${Prefix}-target-group"
+      HealthCheckIntervalSeconds: 7
+      HealthCheckPath: "/health-check"
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 6
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Port: 3030
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+
+Outputs:
+  LoadBalancerSecurityGroup:
+    Description: A reference to the load balancer security group ID
+    Value: !Ref LoadBalancerSecurityGroup
+
+  LoadBalancerDNSName:
+    Description: Load balancer DNS name
+    Value: !GetAtt LoadBalancer.DNSName
+
+  LoadBalancerFullName:
+    Description: Load balancer full name
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+
+  LoadBalancerTargetGroupFullName:
+    Description: Load balancer target group full name
+    Value: !GetAtt LoadBalancerTargetGroup.TargetGroupFullName
+
+  LoadBalancerTargetGroupArn:
+    Description: Load balancer target group Arn
+    Value: !Ref LoadBalancerTargetGroup

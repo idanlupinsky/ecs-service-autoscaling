@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provisions an ECS cluster and supporting IAM roles.
+
+Parameters:
+  Prefix:
+    Type: String
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: Create VPC endpoints in this VPC
+
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: The public subnets in which to create the service
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: The security group associated with the load balancer
+
+  LoadBalancerTargetGroupArn:
+    Type: String
+    Description: The load balancer target group ARN
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${Prefix}-ecs-cluster"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-ecs-cluster"
+
+  ECSTaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS task security group
+      GroupName: !Sub "${Prefix}-ecs-task-sg"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+          IpProtocol: -1
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-ecs-task-sg"
+
+  # This role is required by ECS tasks to pull container images, publish container
+  # logs to CloudWatch, as well as retrieve secrets from the Secrets Manager
+  # The managed policy arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  # is equivalent to the below inline policy with the exception of the secretsmanager action
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-ecs-task-execution-role"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: !Sub "${Prefix}-ecs-task-execution-role-policy"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:BatchGetImage"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "secretsmanager:GetSecretValue"
+                Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-ecs-task-execution-role"
+
+  # This role allows ECS tasks to access other AWS resources / APIs
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-ecs-task-role"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-ecs-task-role"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "${Prefix}"
+      RetentionInDays: 14
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: !Sub "${Prefix}"
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 60
+      # For CloudFormation not to get stuck during AWS::ECS::Service specify the task ARN
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref PublicSubnets
+          SecurityGroups:
+            - !Ref ECSTaskSecurityGroup
+      LoadBalancers:
+        - ContainerName: api
+          ContainerPort: 3030
+          TargetGroupArn: !Ref LoadBalancerTargetGroupArn
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      TaskRoleArn: !Ref ECSTaskRole
+      Family: !Sub "${Prefix}"
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        - Name: api
+          Image: "idanlupinsky/autoscaled-service-example:latest"
+          PortMappings:
+            - ContainerPort: 3030
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: api
+
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-auto-scaling-role"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [application-autoscaling.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: !Sub "${Prefix}-auto-scaling-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:DeleteAlarms
+                Resource:
+                  - "*"
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: Service
+    Properties:
+      RoleARN: !GetAtt AutoScalingRole.Arn
+      ResourceId: !Join
+        - "/"
+        - [service, !Ref ECSCluster, !GetAtt [Service, Name]]
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: 1
+      MaxCapacity: 5
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${Prefix}-auto-scaling-policy"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 75.0
+
+Outputs:
+  ECSCluster:
+    Description: A reference to the ECS Cluster
+    Value: !Ref ECSCluster
+
+  ECSTaskExecutionRole:
+    Description: A reference to the ECS task execution role ARN
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+
+  ECSTaskRole:
+    Description: A reference to the ECS task role ARN
+    Value: !GetAtt ECSTaskRole.Arn
+
+  LogGroup:
+    Description: A reference to the API Log Group Arn
+    Value: !GetAtt LogGroup.Arn

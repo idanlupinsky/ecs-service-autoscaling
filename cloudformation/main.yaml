@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provisions an auto-scaled ECS service and its supporting infrastructure.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: "autoscaled-service"
+
+Resources:
+  VPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./vpc.yaml
+      Parameters:
+        Prefix: !Ref Prefix
+        VPCCIDR: 10.2.0.0/16
+        PublicSubnet1CIDR: 10.2.2.0/24
+        PublicSubnet2CIDR: 10.2.3.0/24
+
+  LoadBalancer:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./load-balancer.yaml
+      Parameters:
+        Prefix: !Ref Prefix
+        VPC: !GetAtt VPC.Outputs.VPC
+        PublicSubnets: !GetAtt VPC.Outputs.PublicSubnets
+
+  ECS:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./ecs.yaml
+      Parameters:
+        Prefix: !Ref Prefix
+        VPC: !GetAtt VPC.Outputs.VPC
+        PublicSubnets: !GetAtt VPC.Outputs.PublicSubnets
+        LoadBalancerSecurityGroup: !GetAtt LoadBalancer.Outputs.LoadBalancerSecurityGroup
+        LoadBalancerTargetGroupArn: !GetAtt LoadBalancer.Outputs.LoadBalancerTargetGroupArn
